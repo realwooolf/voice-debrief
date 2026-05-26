@@ -1,4 +1,4 @@
-# interview-debrief
+# voice-debrief
 
 面试复盘 skill for Claude Code — 上传录音或转录文本，自动转录、整理问答、生成总评，保存到本地或飞书文档。
 
@@ -9,7 +9,7 @@ An interview debrief skill for Claude Code — upload a recording or transcript,
 ## 安装 / Install
 
 ```bash
-npx skills add realwooolf/interview-debrief
+npx skills add realwooolf/voice-debrief
 ```
 
 ---
