@@ -38,9 +38,10 @@ pip install mlx-whisper
 brew install ffmpeg
 
 # Other platforms
-pip install openai-whisper
+pip install faster-whisper
 brew install ffmpeg      # macOS
-# sudo apt install ffmpeg  # Ubuntu
+# sudo apt install ffmpeg  # Ubuntu / Debian
+# winget install ffmpeg    # Windows
 ```
 
 ---
@@ -74,4 +75,5 @@ On first use, the skill will guide you through setting up a Feishu app (~5 min).
 | 平台 / Platform | 转录方式 / Engine | 速度 / Speed |
 |---|---|---|
 | Apple Silicon Mac (M1–M4) | mlx-whisper (GPU) | 41 min audio ≈ 3–5 min |
-| Intel Mac / Windows / Linux | openai-whisper (CPU) | Slower, depends on hardware |
+| Linux / Windows + NVIDIA GPU | faster-whisper (CUDA) | Auto-detected, fast |
+| Intel Mac / No GPU | faster-whisper (CPU int8) | 2–4x faster than openai-whisper |
