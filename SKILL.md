@@ -1,9 +1,9 @@
 ---
 name: voice-debrief
-description: 面试录音转译复盘助手，处理面试录音或转录文本，支持保存到飞书文档（完整对话、问答整理、总评）并自动归档到多维表格。触发场景：用户提到"面试复盘"、上传音频文件（.wav/.m4a/.mp3/.mp4）需要转录、上传 PDF 转录文件需要整理、或说"帮我整理这场面试"。
+description: 面试/工作会议录音转译复盘助手，处理面试或会议录音、转录文本，支持保存到飞书文档并自动归档到对应的多维表格（面试记录表 / 会议记录表，两者独立不混存）。触发场景：用户提到"面试复盘"、"会议纪要"、"整理这场会议"、上传音频文件（.wav/.m4a/.mp3/.mp4）需要转录、上传 PDF 转录文件需要整理。
 ---
 
-# 面试复盘
+# 录音复盘（面试 / 会议）
 
 根据传入的文件类型自动判断执行阶段：
 - 传入音频文件（.wav / .m4a / .mp3）或视频文件（.mp4）→ 执行阶段一：本地转录
@@ -101,14 +101,18 @@ sudo apt install ffmpeg
      "app_id": "你的 App ID",
      "app_secret": "你的 App Secret",
      "interview_bitable_app_token": "",
-     "interview_bitable_table_id": ""
+     "interview_bitable_table_id": "",
+     "meeting_bitable_app_token": "",
+     "meeting_bitable_table_id": ""
    }
    EOF
    ```
 
-3. 多维表格配置（二选一）：
-   - **没有表格**：两个字段留空，第一次运行时 skill 会自动创建并写入
-   - **已有表格**：打开飞书多维表格，URL 格式为 `https://xxx.feishu.cn/base/ClG9xxxxxxx?table=tblxxxxxxx`，`ClG9xxxxxxx` 填入 `interview_bitable_app_token`，`tblxxxxxxx` 填入 `interview_bitable_table_id`
+3. 多维表格配置（面试记录表、会议记录表各自独立，二选一）：
+   - **没有表格**：对应两个字段留空，第一次运行时 skill 会按类型自动创建对应的表并写入
+   - **已有表格**：打开飞书多维表格，URL 格式为 `https://xxx.feishu.cn/base/ClG9xxxxxxx?table=tblxxxxxxx`，`ClG9xxxxxxx` 填入对应的 `_bitable_app_token`，`tblxxxxxxx` 填入对应的 `_bitable_table_id`
+
+   面试应用（app_id/app_secret）和授权是共用的，只有多维表格是分开的两张表，互不影响。
 
 配置完成后，第一次使用时会自动打开浏览器完成飞书 OAuth 授权，之后 token 自动缓存，无需重复操作。
 
@@ -181,23 +185,34 @@ def transcribe(files):
 
 ---
 
-## 阶段二：面试整理 → 输出结果
+## 阶段二：整理 → 输出结果
 
 **触发条件：** 文件扩展名为 .pdf，或阶段一/阶段零完成后的转录文本
 
 启动前分两步收集信息：
 
-**第一问（单独问）：**
+**第一问（单独问，合并成一条消息）：**
 - 保存方式：本地文件 还是 飞书文档？
+- 类型：面试 / 工作会议 / 其他（不确定就默认面试；内容明显是会议讨论则默认会议）
 
 收到回答后，若选飞书，检查 `~/.claude/feishu_config.json` 是否存在且 `app_id` / `app_secret` 均为非空非占位符（不等于「你的 App ID」）。若未配置或配置不完整，先引导完成飞书配置（见「飞书配置」章节），配置完成后再继续。
 
-**第二问（合并成一条消息）：**
+**第二问（按类型分别收集，合并成一条消息）：**
+
+**面试：**
 - 日期（格式：YYYY-MM-DD）
 - 公司名、岗位名、面试轮次（如一面、二面、终面）
 - 面试官姓名（选填）、面试时长（选填，如 45min）
 
-默认按面试类型处理。若用户说明是「其他」类型（如聊天、咨询等），则改为询问对方身份和主题，且跳过多维表格更新。
+**工作会议：**
+- 日期（格式：YYYY-MM-DD）
+- 会议主题、项目/类别（用于多维表格筛选，如所属项目名）
+- 参会人（选填）、会议时长（选填，如 45min）
+
+**其他：**
+- 日期
+- 对方身份、主题
+（跳过多维表格更新）
 
 根据类型生成对应的文档标题和信息头：
 
@@ -208,6 +223,14 @@ def transcribe(files):
 {公司名} 面试总评
 
 信息头：公司 / 岗位 / 轮次 / 日期
+```
+
+**工作会议：**
+```
+{会议主题} 完整对话
+{会议主题} 会议纪要（内含：要点整理 / 结论 / 待办事项）
+
+信息头：会议主题 / 项目类别 / 参会人 / 日期
 ```
 
 **其他：**
@@ -221,22 +244,23 @@ def transcribe(files):
 
 ### 1. 本地保存（选本地时执行）
 
-将整理结果写入录音文件同目录下的 .md 文件：
+将整理结果写入录音文件同目录下的 .md 文件。面试/其他类型是三个文件（完整对话/问答整理/总评），工作会议是两个文件（完整对话/会议纪要）：
 
 ```python
 import os
 
-def save_local(source_path, title, full_dialogue, qa, summary):
+def save_local(source_path, title, parts):
     # source_path 可以是音频文件或 PDF 文件路径
+    # parts: [(后缀, 内容), ...]，面试/其他传三项，会议传两项（完整对话、会议纪要）
     base_dir = os.path.dirname(os.path.abspath(source_path))
-    for suffix, content in [("完整对话", full_dialogue), ("问答整理", qa), ("总评", summary)]:
+    for suffix, content in parts:
         out = os.path.join(base_dir, f"{title}-{suffix}.md")
         with open(out, "w", encoding="utf-8") as f:
             f.write(content)
         print(f"已保存：{out}")
 ```
 
-保存完成后，将总评内容直接输出在对话框中。后续飞书相关步骤全部跳过。
+保存完成后，将总评/会议纪要内容直接输出在对话框中。后续飞书相关步骤全部跳过。
 
 ---
 
@@ -358,11 +382,13 @@ def get_token():
 
 ### 4. 识别发言人
 
-根据对话内容判断：
+**面试/其他：** 根据对话内容判断：
 - 做自我介绍、介绍项目、回答问题的是**我**
 - 提问、追问、给反馈的是**面试官**
 
-### 5. 生成三个飞书文档
+**工作会议：** 按参会人姓名/角色区分发言人（如有多人），无法确定具体姓名时用「发言人A」「发言人B」等标注，保持前后一致。
+
+### 5. 生成飞书文档（面试/其他为三个文档，会议为两个文档）
 
 **重要注意事项（调试确认）：**
 - 用 subprocess curl 调用飞书 API，绕过 Python SSL 栈（Python 3.14 + 本地代理会导致 SSL handshake 失败）
@@ -439,6 +465,7 @@ def divider():
 
 #### 每个文档开头写入基础信息块
 
+**面试/其他：**
 ```
 公司：{公司名}
 岗位：{岗位名}
@@ -447,25 +474,32 @@ def divider():
 ────────────────────────
 ```
 
+**工作会议：**
+```
+会议主题：{会议主题}
+项目/类别：{项目类别}
+参会人：{参会人}
+日期：{会议日期}
+────────────────────────
+```
+
 ---
 
 #### 文档一：完整对话
 
-- 全程对话按时间顺序，**面试官：** 加粗，**我：** 加粗（不加颜色）
+- 全程对话按时间顺序，发言人加粗（面试官：/我：，或会议参会人姓名/角色）
 - 保留完整内容，不删减
 
 ---
 
-#### 文档二：问答整理
+#### 面试/其他 — 文档二：问答整理
 
 - 每组问答独立分块，加二级标题（Q1、Q2……）
 - 标题概括该组问答的核心话题
 - 包含候选人的反问部分
 - 每组问答之间空一行
 
----
-
-#### 文档三：面试总评
+#### 面试/其他 — 文档三：面试总评
 
 根据对话内容灵活调整结构，基础框架：
 
@@ -479,13 +513,27 @@ def divider():
 
 如有特殊情况（面试官明确反馈、压力性问题、明显失误等），单独增加板块说明。
 
-### 6. 面试总评同时在对话框内输出
+---
 
-三个文档创建完毕后，**必须**将面试总评内容完整输出在对话框中，不能省略。这一步是强制的，不能跳过。
+#### 工作会议 — 文档二：会议纪要
 
-### 7. 更新多维表格（仅面试类型）
+单个文档内依次包含三个板块（二级标题分隔）：
 
-三个文档创建完成后，自动更新 `~/.claude/feishu_config.json` 中配置的面试记录多维表格。
+**要点整理**：按讨论议题分块，每个议题加二级标题概括主题，正文提炼讨论要点（不是逐字稿）
+
+**结论 / 决策**：本次会议达成的结论、拍板事项，逐条列出
+
+**待办事项**：逐条列出，格式为「事项 —— 负责人（如有提及）—— 截止时间（如有提及）」，未提及负责人或截止时间的项就只写事项本身，不编造
+
+### 6. 总评/纪要同时在对话框内输出
+
+文档创建完毕后，**必须**将面试总评（面试/其他）或会议纪要（工作会议）内容完整输出在对话框中，不能省略。这一步是强制的，不能跳过。
+
+### 7. 更新多维表格（面试类型 → 面试记录表；工作会议类型 → monee会议记录表；其他类型跳过）
+
+文档创建完成后，自动更新 `~/.claude/feishu_config.json` 中配置的对应多维表格。面试和会议是两张完全独立的表，互不影响，各自有各自的 `_bitable_app_token` / `_bitable_table_id`。
+
+#### 面试类型
 
 **首先检查并自动创建多维表格（若未配置）：**
 
@@ -582,8 +630,6 @@ def create_bitable_if_needed(token):
 
     print(f"✅ 多维表格已创建：https://feishu.cn/base/{app_token}")
 ```
-
-**仅面试类型执行此步骤，其他类型直接跳到第 8 步。**
 
 执行顺序：先调用 `create_bitable_if_needed(token)` 确保表格存在，再调用 `update_bitable` 写入记录。
 
@@ -723,30 +769,173 @@ update_bitable(token, company=公司名, round_name=面试轮次,
                doc1_id=doc1_id, doc2_id=doc2_id, doc3_id=doc3_id)
 ```
 
+#### 工作会议类型
+
+会议记录表和面试记录表是两张独立的多维表格，不共用、不合并。表名固定为「monee会议记录」。
+
+**逻辑：** 每次会议永远新建一条记录，不做面试表那种同名合并/轮次后缀逻辑（会议主题本身通常每次不同，不需要合并）。
+
+```python
+def create_meeting_bitable_if_needed(token):
+    cfg_path = os.path.expanduser("~/.claude/feishu_config.json")
+    cfg = json.load(open(cfg_path))
+    if cfg.get("meeting_bitable_app_token") and cfg.get("meeting_bitable_table_id"):
+        return  # 已配置，跳过
+
+    print("未检测到会议记录表，正在自动创建...")
+
+    r = curl_post("https://open.feishu.cn/open-apis/bitable/v1/apps",
+                  {"name": "monee会议记录"}, token)
+    if r.get("code") != 0:
+        print(f"创建多维表格失败: {r}")
+        return
+    app_token = r["data"]["app"]["app_token"]
+
+    r2 = subprocess.run(
+        ["curl", "-sk", f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables",
+         "--noproxy", "*", "-H", f"Authorization: Bearer {token}"],
+        capture_output=True, text=True, timeout=30)
+    table_id = json.loads(r2.stdout)["data"]["items"][0]["table_id"]
+
+    fields_url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields"
+    records_url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
+
+    # 删除默认空行
+    recs_r = subprocess.run(
+        ["curl", "-sk", f"{records_url}?page_size=100", "--noproxy", "*",
+         "-H", f"Authorization: Bearer {token}"],
+        capture_output=True, text=True, timeout=30)
+    for rec in json.loads(recs_r.stdout).get("data", {}).get("items", []):
+        if not rec.get("fields"):
+            subprocess.run(
+                ["curl", "-sk", "-X", "DELETE", f"{records_url}/{rec['record_id']}",
+                 "--noproxy", "*", "-H", f"Authorization: Bearer {token}"],
+                capture_output=True, text=True, timeout=15)
+
+    # 删除默认多余列，保留主字段
+    fields_r = subprocess.run(
+        ["curl", "-sk", f"{fields_url}?page_size=100", "--noproxy", "*",
+         "-H", f"Authorization: Bearer {token}"],
+        capture_output=True, text=True, timeout=30)
+    keep_names = {"项目类别","日期","时长","参会人","完整对话","会议纪要","备注"}
+    for f in json.loads(fields_r.stdout).get("data", {}).get("items", []):
+        if not f.get("is_primary") and f["field_name"] not in keep_names:
+            subprocess.run(
+                ["curl", "-sk", "-X", "DELETE", f"{fields_url}/{f['field_id']}",
+                 "--noproxy", "*", "-H", f"Authorization: Bearer {token}"],
+                capture_output=True, text=True, timeout=15)
+
+    # 主字段改名为「会议主题」
+    fields_r2 = subprocess.run(
+        ["curl", "-sk", f"{fields_url}?page_size=100", "--noproxy", "*",
+         "-H", f"Authorization: Bearer {token}"],
+        capture_output=True, text=True, timeout=30)
+    for f in json.loads(fields_r2.stdout).get("data", {}).get("items", []):
+        if f.get("is_primary"):
+            import tempfile as _tf
+            _payload = json.dumps({"field_name": "会议主题", "type": 1}, ensure_ascii=False)
+            with _tf.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding='utf-8') as _ff:
+                _ff.write(_payload); _ffname = _ff.name
+            subprocess.run(
+                ["curl", "-sk", "-X", "PUT", f"{fields_url}/{f['field_id']}", "--noproxy", "*",
+                 "-H", "Content-Type: application/json", "-H", f"Authorization: Bearer {token}",
+                 "--data", f"@{_ffname}"],
+                capture_output=True, text=True, timeout=15)
+            import os as _os; _os.unlink(_ffname)
+            break
+
+    # 新建业务字段（不含「会议主题」，它已是主字段）
+    for field in [
+        {"field_name": "项目类别", "type": 1},
+        {"field_name": "日期",     "type": 5},
+        {"field_name": "时长",     "type": 1},
+        {"field_name": "参会人",   "type": 1},
+        {"field_name": "完整对话", "type": 15},
+        {"field_name": "会议纪要", "type": 15},
+        {"field_name": "备注",     "type": 1},
+    ]:
+        curl_post(fields_url, field, token)
+
+    cfg["meeting_bitable_app_token"] = app_token
+    cfg["meeting_bitable_table_id"] = table_id
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+
+    print(f"✅ monee会议记录表已创建：https://feishu.cn/base/{app_token}")
+
+
+def update_meeting_bitable(token, topic, category, date_str, attendees, duration,
+                            doc1_id, doc2_id):
+    cfg = json.load(open(os.path.expanduser("~/.claude/feishu_config.json")))
+    app_token = cfg.get("meeting_bitable_app_token")
+    table_id = cfg.get("meeting_bitable_table_id")
+    if not app_token or not table_id:
+        print("会议记录表未配置，跳过")
+        return
+
+    base_url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}"
+
+    import datetime
+    y, m, d = map(int, date_str.split("-"))
+    date_ts_ms = int(datetime.datetime(y, m, d).timestamp() * 1000)
+
+    fields = {
+        "会议主题": topic,   # 主字段
+        "项目类别": category,
+        "日期": date_ts_ms,
+        "完整对话": {
+            "text": f"{topic}-完整对话",
+            "link": f"https://feishu.cn/docx/{doc1_id}"
+        },
+        "会议纪要": {
+            "text": f"{topic}-会议纪要",
+            "link": f"https://feishu.cn/docx/{doc2_id}"
+        }
+    }
+    if attendees:
+        fields["参会人"] = attendees
+    if duration:
+        fields["时长"] = duration
+
+    r = curl_post_bitable(f"{base_url}/records", {"fields": fields}, token)
+    print("会议记录表新建：", "成功" if r.get("code") == 0 else r)
+```
+
+调用时传入收集好的信息：
+```python
+create_meeting_bitable_if_needed(token)
+update_meeting_bitable(token, topic=会议主题, category=项目类别,
+                       date_str=会议日期, attendees=参会人(可为None),
+                       duration=时长(可为None),
+                       doc1_id=doc1_id, doc2_id=doc2_id)
+```
+
 ### 8. 完成提示 + 询问复盘追问模式
+
+面试/其他类型收尾文档是「总评」，工作会议类型收尾文档是「会议纪要」——以下统称"收尾文档"。
 
 在对话框中按以下顺序输出，**不能拆分成多条消息**：
 
-1. 告知三个飞书文档已创建，多维表格已更新
+1. 告知飞书文档已创建（面试/其他三个，会议两个），对应多维表格已更新
 2. 输出每个文档的链接（格式：`https://feishu.cn/docx/{document_id}`）
-3. 完整输出面试总评内容
+3. 完整输出收尾文档内容（总评 或 会议纪要）
 4. 用 AskUserQuestion 询问是否开启复盘追问模式
 
 **询问复盘追问模式：**
 
 用 AskUserQuestion 给出选项：
 
-**问题：** 是否需要把后续追问内容保存到总评文档里？
-**选项 A（开启）：** 后续追问说「存」时自动整理并追加到总评
+**问题：** 是否需要把后续追问内容保存到收尾文档里？
+**选项 A（开启）：** 后续追问说「存」时自动整理并追加到收尾文档
 **选项 B（不需要）：** 只看文档，不保存追问
 
 用户选 B 则流程结束。
 
 用户选 A 则回复：
 
-> 📌 **复盘追问模式已开启。** 说「**存**」时我把这段追问整理后追加到总评的「复盘追问」章节。
+> 📌 **复盘追问模式已开启。** 说「**存**」时我把这段追问整理后追加到收尾文档的「复盘追问」章节。
 
-**收集范围：** 从用户选择开启起，到用户说触发词之前，所有和本场面试相关的问答内容。
+**收集范围：** 从用户选择开启起，到用户说触发词之前，所有和本场面试/会议相关的问答内容。
 
 **触发词：** 用户说「存」「存进去」「保存」「存到飞书」任意一个即触发保存。
 
@@ -754,10 +943,10 @@ update_bitable(token, company=公司名, round_name=面试轮次,
 1. 回顾本次对话中从开启追问模式之后的所有 Q&A
 2. 整理为问答格式：每组以 `Q：` 开头写用户问题，正文写回答
 3. 用 `h2` 格式分组，每个问题一个 `h2` 标题
-4. 调用飞书 API，在对应总评文档末尾追加 `divider` + `h1("复盘追问")` + 各问答块
-5. 如果总评文档里已有「复盘追问」章节（非首次保存），则只追加新内容，不重复写标题
-6. 保存完成后提示「已存入总评」，继续保持追问模式——用户可继续追问，下次说触发词时追加新增部分
+4. 调用飞书 API，在对应收尾文档末尾追加 `divider` + `h1("复盘追问")` + 各问答块
+5. 如果收尾文档里已有「复盘追问」章节（非首次保存），则只追加新内容，不重复写标题
+6. 保存完成后提示「已存入文档」，继续保持追问模式——用户可继续追问，下次说触发词时追加新增部分
 
-**多场面试处理：** 如果本次 skill 处理了多场面试，回复时说明：「说『存虾皮』『存追觅』可以分别保存到对应总评，或说『都存』同时保存。」
+**多场处理：** 如果本次 skill 处理了多场面试/会议，回复时说明：「说『存虾皮』『存追觅』可以分别保存到对应文档，或说『都存』同时保存。」
 
 **本地保存模式下：** 跳过此步骤，不询问。
